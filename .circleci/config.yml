@@ -1,0 +1,83 @@
+# Reproduce CircleCI outbound webhook retries (5s response-header timeout).
+#
+# Setup:
+#   1. Push this repo to GitHub and add the project in CircleCI.
+#   2. Create a Heroku app: heroku create your-webhook-delay-test
+#   3. In CircleCI → Project Settings → Environment Variables:
+#        HEROKU_API_KEY   - Heroku account API key
+#        HEROKU_APP_NAME  - e.g. your-webhook-delay-test
+#   4. Run pipeline (deploys app, then completes workflow).
+#   5. In CircleCI → Project Settings → Webhooks → Add Webhook:
+#        URL: https://<HEROKU_APP_NAME>.herokuapp.com/circleci/
+#        Event: workflow-completed
+#   6. Re-run pipeline with skip_deploy=true. Watch Heroku logs:
+#        heroku logs --tail -a <HEROKU_APP_NAME>
+#
+# With header_delay_ms=5100 (default), expect two POSTs with the same payload id.
+
+version: 2.1
+
+orbs:
+  heroku: circleci/heroku@2.0.0
+
+parameters:
+  header_delay_ms:
+    type: string
+    default: "5100"
+  skip_deploy:
+    type: boolean
+    default: false
+
+jobs:
+  deploy-heroku:
+    docker:
+      - image: cimg/node:20.0
+    steps:
+      - checkout
+      - heroku/install
+      - run:
+          name: Configure Heroku header delay
+          command: |
+            heroku config:set HEADER_DELAY_MS=<< pipeline.parameters.header_delay_ms >> -a "${HEROKU_APP_NAME}"
+      - heroku/deploy-via-git:
+          app-name: ${HEROKU_APP_NAME}
+
+  trigger-webhook:
+    docker:
+      - image: cimg/base:stable
+    steps:
+      - run:
+          name: Complete workflow (fires workflow-completed webhook)
+          command: |
+            echo "Workflow finished."
+            echo "Webhook URL: https://${HEROKU_APP_NAME}.herokuapp.com/circleci/"
+            echo "Check Heroku logs: heroku logs --tail -a ${HEROKU_APP_NAME}"
+            echo ""
+            echo "HEADER_DELAY_MS=<< pipeline.parameters.header_delay_ms >>"
+            echo "  <= 3000 ms: expect 1 POST"
+            echo "  >= 5100 ms: expect 2 POSTs with the same payload id"
+
+workflows:
+  repro-webhook-retry:
+    jobs:
+      - deploy-heroku:
+          filters:
+            branches:
+              only: main
+          when:
+            not: << pipeline.parameters.skip_deploy >>
+      - trigger-webhook:
+          requires:
+            - deploy-heroku:
+                - success
+                - skipped
+          filters:
+            branches:
+              only: main
+
+  trigger-only:
+    jobs:
+      - trigger-webhook:
+          filters:
+            branches:
+              ignore: main
